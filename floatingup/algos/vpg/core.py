@@ -32,8 +32,8 @@ def placeholders_from_spaces(*args):
     return [placeholder_from_space(space) for space in args]
 
 """
+# wont need any of the placeholder functions in vpg.py
 
-# wont need any of the placeholder functios in vpg.py
 # def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None):
 #     for h in hidden_sizes[:-1]:
 #         x = tf.layers.dense(x, units=h, activation=activation)
@@ -65,9 +65,10 @@ class NeuralNetwork(nn.Module):
 
 def get_vars(scope=''):
     return [x for x in tf.trainable_variables() if scope in x.name]
-def count_vars(scope=''):
-    v = get_vars(scope)
-    return sum([np.prod(var.shape.as_list()) for var in v])
+
+def count_vars(module):
+    return sum(p.numel() for p in module.parameters() if p.requires_grad)
+
 def gaussian_likelihood(x, mu, log_std):
     pre_sum = -0.5 * (((x-mu)/(tf.exp(log_std)+EPS))**2 + 2*log_std + np.log(2*np.pi))
     return tf.reduce_sum(pre_sum, axis=1)
