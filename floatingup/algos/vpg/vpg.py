@@ -4,9 +4,11 @@ import torch
 import torch.nn as nn
 import gym
 import time
+from floatingup.utils.logx import EpochLogger
 import floatingup.algos.vpg.core as core
 from floatingup.utils.mpi_tools import mpi_fork, mpi_avg, proc_id, mpi_statistics_scalar, num_procs
 from floatingup.utils.mpi_torch import average_gradients,sync_all_params
+import torch.nn.functional as F
 
 class VPGBuffer:
     """
@@ -16,8 +18,8 @@ class VPGBuffer:
     """
 
     def __init__(self, obs_dim, act_dim, size, gamma=0.99, lam=0.95):
-        self.obs_buf = np.zeros(core.combined_shape(size, obs_dim), dtype=np.float32)
-        self.act_buf = np.zeros(core.combined_shape(size, act_dim), dtype=np.float32)
+        self.obs_buf = np.zeros(self._combined_shape(size, obs_dim), dtype=np.float32)
+        self.act_buf = np.zeros(self._combined_shape(size, act_dim), dtype=np.float32)
         self.adv_buf = np.zeros(size, dtype=np.float32)
         self.rew_buf = np.zeros(size, dtype=np.float32)
         self.ret_buf = np.zeros(size, dtype=np.float32)
@@ -80,6 +82,26 @@ class VPGBuffer:
         self.adv_buf = (self.adv_buf - adv_mean) / adv_std
         return [self.obs_buf, self.act_buf, self.adv_buf, 
                 self.ret_buf, self.logp_buf]
+
+    def _combined_shape(self, length, shape=None):
+        if shape is None:
+            return (length,)
+        return (length, shape) if np.isscalar(shape) else (length, *shape)
+
+    def _discount_cumsum(self, x, discount):
+        """
+        magic from rllab for computing discounted cumulative sums of vectors.
+        input:
+            vector x,
+            [x0,
+            x1,
+            x2]
+        output:
+            [x0 + discount * x1 + discount^2 * x2,
+            x1 + discount * x2,
+            x2]
+        """
+        return scipy.signal.lfilter([1], [1, float(-discount)], x[::-1], axis=0)[::-1]
 
 
 """
@@ -186,40 +208,66 @@ def vpg(env_fn, actor_critic=core.ActorCritic, ac_kwargs=dict(), seed=0,
     # Sync params across processes
     sync_all_params(actor_critic.parameters())
 
-    # Setup model saving
-    logger.setup_tf_saver(sess, inputs={'x': x_ph}, outputs={'pi': pi, 'v': v})
-
     def update():
-        inputs = {k:v for k,v in zip(all_phs, buf.get())}
-        pi_l_old, v_l_old, ent = sess.run([pi_loss, v_loss, approx_ent], feed_dict=inputs)
+        # inputs = {k:v for k,v in zip(all_phs, buf.get())}
+        # pi_l_old, v_l_old, ent = sess.run([pi_loss, v_loss, approx_ent], feed_dict=inputs)
+
+        obs,act,adv,ret,logp_old = [torch.Tensor(x) for x in buf.get()]
 
         # Policy gradient step
-        sess.run(train_pi, feed_dict=inputs)
+        _,logp,_ = actor_critic.policy(obs,act)
+        ent = (-logp).mean() # a sample estimate for entropy
+
+        # VPG policy objective
+        pi_loss = -(logp*adv).mean()
+
+        # Policy gradient step
+        train_pi.zero_grad()
+        pi_loss.backward()
+        average_gradients(train_pi.param_groups)
+        train_pi.step()
 
         # Value function learning
-        for _ in range(train_v_iters):
-            sess.run(train_v, feed_dict=inputs)
+        v = actor_critic.value_function(obs)
+        v_l_old = F.mse_loss(v,ret)
 
-        # Log changes from update
-        pi_l_new, v_l_new, kl = sess.run([pi_loss, v_loss, approx_kl], feed_dict=inputs)
-        logger.store(LossPi=pi_l_old, LossV=v_l_old, 
-                     KL=kl, Entropy=ent, 
-                     DeltaLossPi=(pi_l_new - pi_l_old),
+        for _ in range(train_v_iters):
+            # Output from value function graph
+            v = actor_critic.value_function(obs)
+            # VPG value objective
+            v_loss = F.mse_loss(v,ret)
+
+            #value function gradient step
+            train_v.zero_grad()
+            v_loss.backward()
+            average_gradients(train_v.param_groups)
+            train_v.step()
+
+        # log changes from update
+        _,logp,_,v = actor_critic(obs,act)
+        pi_l_new = -(logp * adv).mean()
+        v_l_new = F.mse_loss(v, ret)
+        kl = (logp_old - logp).mean()  # a sample estimate for KL-divergence
+        logger.store(LossPi=pi_loss, LossV=v_l_old,
+                     KL=kl, Entropy=ent,
+                     DeltaLossPi=(pi_l_new - pi_loss),
                      DeltaLossV=(v_l_new - v_l_old))
 
     start_time = time.time()
     o, r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
 
+
     # Main loop: collect experience in env and update/log each epoch
     for epoch in range(epochs):
+        actor_critic.eval()
         for t in range(local_steps_per_epoch):
-            a, v_t, logp_t = sess.run(get_action_ops, feed_dict={x_ph: o.reshape(1,-1)})
+            a,_,logp_t,v_t = actor_critic(torch.Tensor(o.reshape(1,-1)))
 
             # save and log
-            buf.store(o, a, r, v_t, logp_t)
+            buf.store(o, a.data.numpy(), r, v_t.item(), logp_t.data.numpy())
             logger.store(VVals=v_t)
 
-            o, r, d, _ = env.step(a[0])
+            o, r, d, _ = env.step(a.data.numpy()[0])
             ep_ret += r
             ep_len += 1
 
@@ -228,7 +276,7 @@ def vpg(env_fn, actor_critic=core.ActorCritic, ac_kwargs=dict(), seed=0,
                 if not(terminal):
                     print('Warning: trajectory cut off by epoch at %d steps.'%ep_len)
                 # if trajectory didn't reach terminal state, bootstrap value target
-                last_val = r if d else sess.run(v, feed_dict={x_ph: o.reshape(1,-1)})
+                last_val = r if d else actor_critic.value_function(torch.Tensor(o.reshape(1,-1))).item()
                 buf.finish_path(last_val)
                 if terminal:
                     # only save EpRet / EpLen if trajectory finished
@@ -240,6 +288,7 @@ def vpg(env_fn, actor_critic=core.ActorCritic, ac_kwargs=dict(), seed=0,
             logger.save_state({'env': env}, None)
 
         # Perform VPG update!
+        actor_critic.train()
         update()
 
         # Log info about epoch
@@ -260,12 +309,12 @@ def vpg(env_fn, actor_critic=core.ActorCritic, ac_kwargs=dict(), seed=0,
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env', type=str, default='HalfCheetah-v2')
+    parser.add_argument('--env', type=str, default='InvertedPendulum-v2')
     parser.add_argument('--hid', type=int, default=64)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--cpu', type=int, default=4)
+    parser.add_argument('--cpu', type=int, default=1)
     parser.add_argument('--steps', type=int, default=4000)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--exp_name', type=str, default='vpg')
@@ -273,10 +322,10 @@ if __name__ == '__main__':
 
     mpi_fork(args.cpu)  # run parallel code with mpi
 
-    from spinup.utils.run_utils import setup_logger_kwargs
+    from floatingup.utils.run_utils import setup_logger_kwargs
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
 
-    vpg(lambda : gym.make(args.env), actor_critic=core.mlp_actor_critic,
+    vpg(lambda : gym.make(args.env), actor_critic=core.ActorCritic,
         ac_kwargs=dict(hidden_sizes=[args.hid]*args.l), gamma=args.gamma, 
         seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs,
         logger_kwargs=logger_kwargs)

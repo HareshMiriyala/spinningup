@@ -9,12 +9,8 @@ from torch.distributions.categorical import Categorical
 from torch.distributions.beta import Beta
 
 EPS = 1e-8
-"""
-def combined_shape(length, shape=None):
-    if shape is None:
-        return (length,)
-    return (length, shape) if np.isscalar(shape) else (length, *shape)
 
+"""
 def placeholder(dim=None):
     return tf.placeholder(dtype=tf.float32, shape=combined_shape(None,dim))
 
@@ -143,8 +139,8 @@ class GaussianPolicy(nn.Module):
                                 output_activation=output_activation)
         self.log_std = nn.Parameter(-0.5*torch.ones(action_dim,dtype=torch.float32))
 
-    def forward(self, input):
-        mu = self.mu
+    def forward(self, x,a=None):
+        mu = self.mu(x)
         policy = Normal(mu,self.log_std.exp())
         pi = policy.sample()
         logp_pi = policy.log_prob(pi).sum(dim=1) # why do we have the .sum(dim=1) ?? find out
