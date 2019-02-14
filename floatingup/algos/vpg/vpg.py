@@ -3,6 +3,7 @@ import tensorflow as tf
 import torch
 import torch.nn as nn
 import gym
+import scipy.signal
 import time
 from floatingup.utils.logx import EpochLogger
 import floatingup.algos.vpg.core as core
@@ -62,10 +63,10 @@ class VPGBuffer:
         
         # the next two lines implement GAE-Lambda advantage calculation
         deltas = rews[:-1] + self.gamma * vals[1:] - vals[:-1]
-        self.adv_buf[path_slice] = core.discount_cumsum(deltas, self.gamma * self.lam)
+        self.adv_buf[path_slice] = self._discount_cumsum(deltas, self.gamma * self.lam)
         
         # the next line computes rewards-to-go, to be targets for the value function
-        self.ret_buf[path_slice] = core.discount_cumsum(rews, self.gamma)[:-1]
+        self.ret_buf[path_slice] = self._discount_cumsum(rews, self.gamma)[:-1]
         
         self.path_start_idx = self.ptr
 
@@ -190,6 +191,7 @@ def vpg(env_fn, actor_critic=core.ActorCritic, ac_kwargs=dict(), seed=0,
 
     # Main model
     actor_critic = actor_critic(in_features=obs_dim[0],
+                                policy="Beta",
                                 **ac_kwargs) # if beta policy, use --- policy = "Beta" ---
 
     # Experience buffer
@@ -209,8 +211,6 @@ def vpg(env_fn, actor_critic=core.ActorCritic, ac_kwargs=dict(), seed=0,
     sync_all_params(actor_critic.parameters())
 
     def update():
-        # inputs = {k:v for k,v in zip(all_phs, buf.get())}
-        # pi_l_old, v_l_old, ent = sess.run([pi_loss, v_loss, approx_ent], feed_dict=inputs)
 
         obs,act,adv,ret,logp_old = [torch.Tensor(x) for x in buf.get()]
 
@@ -282,7 +282,6 @@ def vpg(env_fn, actor_critic=core.ActorCritic, ac_kwargs=dict(), seed=0,
                     # only save EpRet / EpLen if trajectory finished
                     logger.store(EpRet=ep_ret, EpLen=ep_len)
                 o, r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
-
         # Save model
         if (epoch % save_freq == 0) or (epoch == epochs-1):
             logger.save_state({'env': env}, None)
