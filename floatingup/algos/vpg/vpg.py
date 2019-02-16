@@ -189,9 +189,10 @@ def vpg(env_fn, actor_critic=core.ActorCritic, ac_kwargs=dict(), seed=0,
     # Share information about action space with policy architecture
     ac_kwargs['action_space'] = env.action_space
 
+    policy_dist = "PERT"
     # Main model
     actor_critic = actor_critic(in_features=obs_dim[0],
-                                policy="Beta",
+                                policy=policy_dist,
                                 **ac_kwargs) # if beta policy, use --- policy = "Beta" ---
 
     # Experience buffer
@@ -225,6 +226,7 @@ def vpg(env_fn, actor_critic=core.ActorCritic, ac_kwargs=dict(), seed=0,
         train_pi.zero_grad()
         pi_loss.backward()
         average_gradients(train_pi.param_groups)
+        print('perform train_pi step')
         train_pi.step()
 
         # Value function learning
@@ -262,12 +264,24 @@ def vpg(env_fn, actor_critic=core.ActorCritic, ac_kwargs=dict(), seed=0,
         actor_critic.eval()
         for t in range(local_steps_per_epoch):
             a,_,logp_t,v_t = actor_critic(torch.Tensor(o.reshape(1,-1)))
-
+            if policy_dist is "Beta" or policy_dist is "PERT":
+                #scale action from 0,1 to -act,act
+                a_scaled = a*torch.tensor(env.action_space.high-env.action_space.low,dtype=torch.float32)+torch.tensor(env.action_space.low,dtype=torch.float32)
+                a_scaled = a_scaled.squeeze()
+                # print(a_scaled.shape)
             # save and log
+            # elif policy_dist is "PERT":
+            #     a_scaled = a*torch.tensor(env.action_space.high,dtype=torch.float32)
+            #     a_scaled = a_scaled.squeeze()
+
             buf.store(o, a.data.numpy(), r, v_t.item(), logp_t.data.numpy())
             logger.store(VVals=v_t)
 
-            o, r, d, _ = env.step(a.data.numpy()[0])
+            if policy_dist is "Beta" or policy_dist is "PERT":
+                o, r, d, _ = env.step(a_scaled.data.numpy())
+            else:
+                o, r, d, _ = env.step(a.data.numpy())
+
             ep_ret += r
             ep_len += 1
 

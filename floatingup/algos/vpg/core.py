@@ -7,6 +7,7 @@ import torch.nn as nn
 from torch.distributions.normal import Normal
 from torch.distributions.categorical import Categorical
 from torch.distributions.beta import Beta
+from torch.distributions import constraints
 
 EPS = 1e-8
 
@@ -62,7 +63,7 @@ class NeuralNetwork(nn.Module):
             x = self.output_activation(self.layers[-1](x))
 
         if self.add_beta_bias:
-            x=x+torch.ones(self.act_dim,dtype=torch.float32)
+            x=x#+torch.ones(self.act_dim,dtype=torch.float32)*torch.tensor(2,dtype=torch.float32)
             # print(x.shape)
 
         if self.output_squeeze:
@@ -129,12 +130,13 @@ class GaussianPolicy(nn.Module):
     def forward(self, x,a=None):
         mu = self.mu(x)
         policy = Normal(mu,self.log_std.exp())
+        print(mu,self.log_std.exp())
         pi = policy.sample()
         # if pi.squeeze().data.numpy().all()>3:
         #     print("Action sampled outside bound!!!")
         # print(pi.squeeze().data)
 
-        print(pi.dtype)
+        # print(pi)
         logp_pi = policy.log_prob(pi).sum(dim=1) # why do we have the .sum(dim=1) ?? find out
         if a is not None:
             logp = policy.log_prob(a).sum(dim=1)
@@ -158,17 +160,21 @@ class BetaPolicy(nn.Module):
                                    add_beta_bias=True)
         self.action_low = torch.tensor(action_space.low,dtype=torch.float32)
         self.action_high = torch.tensor(action_space.high,dtype=torch.float32)
+        self.action_space = action_space
 
     def forward(self,x,a=None):
         # according to the beta-dist paper, add 1 to both alpha and beta
-        alpha = self.alpha(x)
-        beta = self.beta(x)
+        alpha = self.alpha(x) + torch.tensor(1,dtype=torch.float32)
+        beta = self.beta(x) + torch.tensor(1,dtype=torch.float32)
         policy = Beta(alpha,beta)
-        pi = torch.mul(policy.sample(),self.action_high-self.action_low)+self.action_low
-        # pi = policy.sample()
-        print(pi.data,'action high:',self.action_high.data,'action low:',self.action_low.data)
+        # print(alpha,beta)
+        # print(alpha.squeeze(),beta.squeeze())
+        pi = policy.sample()#*(self.action_high-self.action_low) + self.action_low
+        pi=pi.squeeze()
+        # print(pi)
 
         logp_pi = policy.log_prob(pi).sum(dim=1)
+
         if a is not None:
             logp = policy.log_prob(a).sum(dim=1)
         else :
@@ -182,22 +188,22 @@ class PERTPolicy(nn.Module):
         super(PERTPolicy,self).__init__()
         self.maxlikely = NeuralNetwork(layers=[in_features]+list(hidden_sizes)+[action_dim],
                                    activation=activation,
-                                   output_activation=output_activation,
-                                   add_beta_bias=True)
-        self.action_low = torch.tensor(action_space.high,dtype=torch.float32)
-        self.action_high = torch.tensor(action_space.low,dtype=torch.float32)
+                                   output_activation=output_activation)
+        self.action_low = torch.tensor(action_space.low,dtype=torch.float32)
+        self.action_high = torch.tensor(action_space.high,dtype=torch.float32)
 
     def forward(self,x,a=None):
         # according to the paper, add 1 to both alpha and beta
         # TODO : check if this is the right way to add bias to alpha and beta.
         b = self.maxlikely(x)
-        alpha = torch.mul(torch.tensor(4,dtype=torch.float32),b)+torch.tensor(1,dtype=torch.float32)
-        beta = torch.mul(torch.tensor(-4,dtype=torch.float32),b)+torch.tensor(5,dtype=torch.float32)
+        # print(b)
+        alpha = torch.tensor(2,dtype=torch.float32)*b+torch.tensor(3,dtype=torch.float32)
+        beta = torch.tensor(-2,dtype=torch.float32)*b+torch.tensor(3,dtype=torch.float32)
         policy = Beta(alpha,beta)
 
-        pi = torch.mul(policy.sample(),self.action_high-self.action_low)+self.action_low
+        pi = policy.sample()#*self.action_high#*(self.action_high-self.action_low)+self.action_low
 
-        print(pi.data)
+        # print(pi.data)
 
         logp_pi = policy.log_prob(pi).sum(dim=1)
         if a is not None:
@@ -236,11 +242,11 @@ class ActorCritic(nn.Module):
             self.policy = CategoricalPolicy(in_features,hidden_sizes,activation,output_activation,action_dim=action_space.shape[0])
         elif policy is "Beta":
             #TODO : Experimental stage for beta policy. check if this is working.
-            self.policy = BetaPolicy(in_features,hidden_sizes,activation,output_activation=torch.sigmoid,
+            self.policy = BetaPolicy(in_features,hidden_sizes,activation,output_activation=F.relu,
                                      action_dim=action_space.shape[0],action_space=action_space)
         elif policy is "PERT":
             # TODO : Experimental stage for beta policy. check if this is working.
-            self.policy = PERTPolicy(in_features,hidden_sizes,activation,output_activation=torch.sigmoid,
+            self.policy = PERTPolicy(in_features,hidden_sizes,activation,output_activation=None,
                                      action_dim=action_space.shape[0], action_space=action_space)
 
         self.value_function = NeuralNetwork(layers=[in_features]+list(hidden_sizes)+[1],activation=activation,
