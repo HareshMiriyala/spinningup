@@ -49,7 +49,7 @@ class NeuralNetwork(nn.Module):
         # form the layers here by appending linear layers to nn.ModuleList()
         for i,layer in enumerate(layers[1:]): # except the first input layer
             self.layers.append(nn.Linear(layers[i],layer))
-            nn.init.zeros_(self.layers[i].bias)
+            # nn.init.zeros_(self.layers[i].bias)
 
     def forward(self, input):
         x = input
@@ -63,8 +63,7 @@ class NeuralNetwork(nn.Module):
             x = self.output_activation(self.layers[-1](x))
 
         if self.add_beta_bias:
-            x=x#+torch.ones(self.act_dim,dtype=torch.float32)*torch.tensor(2,dtype=torch.float32)
-            # print(x.shape)
+            x=x.clone().add_(2)
 
         if self.output_squeeze:
             x=x.squeeze()
@@ -150,6 +149,7 @@ class GaussianPolicy(nn.Module):
 class BetaPolicy(nn.Module):
     def __init__(self,in_features,hidden_sizes,activation,output_activation,action_dim,action_space):
         super(BetaPolicy,self).__init__()
+        # according to the beta-dist paper, add 1 to both alpha and beta, handled by 'add_beta_bias' param
         self.alpha = NeuralNetwork(layers=[in_features]+list(hidden_sizes)+[action_dim],
                                    activation=activation,
                                    output_activation=output_activation,
@@ -158,19 +158,17 @@ class BetaPolicy(nn.Module):
                                    activation=activation,
                                    output_activation=output_activation,
                                    add_beta_bias=True)
-        self.action_low = torch.tensor(action_space.low,dtype=torch.float32)
-        self.action_high = torch.tensor(action_space.high,dtype=torch.float32)
-        self.action_space = action_space
+
 
     def forward(self,x,a=None):
-        # according to the beta-dist paper, add 1 to both alpha and beta
-        alpha = self.alpha(x) + torch.tensor(1,dtype=torch.float32)
-        beta = self.beta(x) + torch.tensor(1,dtype=torch.float32)
+        alpha = self.alpha(x)
+        beta = self.beta(x)
         policy = Beta(alpha,beta)
         # print(alpha,beta)
         # print(alpha.squeeze(),beta.squeeze())
-        pi = policy.sample()#*(self.action_high-self.action_low) + self.action_low
+        pi = policy.sample()
         pi=pi.squeeze()
+
         # print(pi)
 
         logp_pi = policy.log_prob(pi).sum(dim=1)
@@ -189,21 +187,20 @@ class PERTPolicy(nn.Module):
         self.maxlikely = NeuralNetwork(layers=[in_features]+list(hidden_sizes)+[action_dim],
                                    activation=activation,
                                    output_activation=output_activation)
-        self.action_low = torch.tensor(action_space.low,dtype=torch.float32)
-        self.action_high = torch.tensor(action_space.high,dtype=torch.float32)
+        self.gamma = nn.Parameter(3*torch.ones(1,dtype=torch.float32))
 
     def forward(self,x,a=None):
         # according to the paper, add 1 to both alpha and beta
         # TODO : check if this is the right way to add bias to alpha and beta.
         b = self.maxlikely(x)
         # print(b)
-        alpha = torch.tensor(2,dtype=torch.float32)*b+torch.tensor(3,dtype=torch.float32)
-        beta = torch.tensor(-2,dtype=torch.float32)*b+torch.tensor(3,dtype=torch.float32)
+        # gamma - exploration factor
+        alpha = 1+self.gamma*b
+        beta = 1+self.gamma*(1-b)
         policy = Beta(alpha,beta)
-
-        pi = policy.sample()#*self.action_high#*(self.action_high-self.action_low)+self.action_low
-
-        # print(pi.data)
+        # if a is None:
+        #     print('[%f,%f]'%(alpha.data,beta.data))
+        pi = policy.sample()
 
         logp_pi = policy.log_prob(pi).sum(dim=1)
         if a is not None:
@@ -246,7 +243,7 @@ class ActorCritic(nn.Module):
                                      action_dim=action_space.shape[0],action_space=action_space)
         elif policy is "PERT":
             # TODO : Experimental stage for beta policy. check if this is working.
-            self.policy = PERTPolicy(in_features,hidden_sizes,activation,output_activation=None,
+            self.policy = PERTPolicy(in_features,hidden_sizes,activation,output_activation=F.softmax,
                                      action_dim=action_space.shape[0], action_space=action_space)
 
         self.value_function = NeuralNetwork(layers=[in_features]+list(hidden_sizes)+[1],activation=activation,

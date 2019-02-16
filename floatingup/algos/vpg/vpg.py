@@ -189,7 +189,7 @@ def vpg(env_fn, actor_critic=core.ActorCritic, ac_kwargs=dict(), seed=0,
     # Share information about action space with policy architecture
     ac_kwargs['action_space'] = env.action_space
 
-    policy_dist = "PERT"
+    policy_dist = "Beta"
     # Main model
     actor_critic = actor_critic(in_features=obs_dim[0],
                                 policy=policy_dist,
