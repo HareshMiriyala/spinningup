@@ -189,7 +189,7 @@ def vpg(env_fn, actor_critic=core.ActorCritic, ac_kwargs=dict(), seed=0,
     # Share information about action space with policy architecture
     ac_kwargs['action_space'] = env.action_space
 
-    policy_dist = "Beta"
+    policy_dist = None
     # Main model
     actor_critic = actor_critic(in_features=obs_dim[0],
                                 policy=policy_dist,
@@ -263,7 +263,8 @@ def vpg(env_fn, actor_critic=core.ActorCritic, ac_kwargs=dict(), seed=0,
     for epoch in range(epochs):
         actor_critic.eval()
         for t in range(local_steps_per_epoch):
-            a,_,logp_t,v_t = actor_critic(torch.Tensor(o.reshape(1,-1)))
+            obs_tensor = torch.Tensor(o.reshape(1,-1))
+            a,_,logp_t,v_t = actor_critic(obs_tensor)
             if policy_dist is "Beta" or policy_dist is "PERT":
                 #scale action from 0,1 to -act,act
                 a_scaled = a*torch.tensor(env.action_space.high-env.action_space.low,dtype=torch.float32)+torch.tensor(env.action_space.low,dtype=torch.float32)

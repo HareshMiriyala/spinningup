@@ -129,7 +129,6 @@ class GaussianPolicy(nn.Module):
     def forward(self, x,a=None):
         mu = self.mu(x)
         policy = Normal(mu,self.log_std.exp())
-        print(mu,self.log_std.exp())
         pi = policy.sample()
         # if pi.squeeze().data.numpy().all()>3:
         #     print("Action sampled outside bound!!!")
